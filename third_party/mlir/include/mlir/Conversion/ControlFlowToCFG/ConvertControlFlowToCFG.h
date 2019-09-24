@@ -23,13 +23,13 @@
 
 namespace mlir {
 class FuncOp;
-class FunctionPassBase;
 struct LogicalResult;
 class MLIRContext;
+template <typename T> class OpPassBase;
 class RewritePattern;
 
 // Owning list of rewriting patterns.
-using OwningRewritePatternList = std::vector<std::unique_ptr<RewritePattern>>;
+class OwningRewritePatternList;
 
 /// Collect a set of patterns to lower from loop.for, loop.if, and
 /// loop.terminator to CFG operations within the Standard dialect, in particular
@@ -38,7 +38,7 @@ void populateLoopToStdConversionPatterns(OwningRewritePatternList &patterns,
                                          MLIRContext *ctx);
 
 /// Creates a pass to convert loop.for, loop.if and loop.terminator ops to CFG.
-FunctionPassBase *createConvertToCFGPass();
+std::unique_ptr<OpPassBase<FuncOp>> createLowerToCFGPass();
 
 } // namespace mlir
 

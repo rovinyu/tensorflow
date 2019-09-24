@@ -26,8 +26,9 @@ Note: If you need access to other Python APIs, such as the [TensorFlow Lite
 Converter](../convert/python_api.md), you must install the [full TensorFlow
 package](https://www.tensorflow.org/install/).
 
-To install, download the appropriate Python wheel for your system from the
-following table, and then install it with with `pip install` command.
+To install just the interpreter, download the appropriate Python wheel for your
+system from the following table, and then install it with the `pip install`
+command.
 
 For example, if you're setting up a Raspberry Pi (using Raspbian Buster, which
 has Python 3.7), install the Python wheel as follows (after you click to
@@ -86,11 +87,17 @@ from tensorflow.lite.python.interpreter import Interpreter
 So it instead reads:
 
 ```python
-from tflite_runtime import Interpreter
+from tflite_runtime.interpreter import Interpreter
 ```
 
 Now run `label_image.py` again. That's it! You're now executing TensorFlow Lite
 models.
+
+## Learn more
+
+If you have a Raspberry Pi, try the
+[classify_picamera.py example](https://github.com/tensorflow/examples/tree/master/lite/examples/image_classification/raspberry_pi)
+to perform image classification with the Pi Camera and TensorFlow Lite.
 
 For more details about the `Interpreter` API, read [Load and run a model
 in Python](inference.md#load-and-run-a-model-in-python).

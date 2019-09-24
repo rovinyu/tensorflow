@@ -134,7 +134,6 @@ import math
 import numpy as np
 import six
 
-
 from tensorflow.python.eager import context
 from tensorflow.python.feature_column import feature_column as fc_old
 from tensorflow.python.feature_column import utils as fc_utils
@@ -165,6 +164,7 @@ from tensorflow.python.platform import gfile
 from tensorflow.python.platform import tf_logging as logging
 from tensorflow.python.training import checkpoint_utils
 from tensorflow.python.training.tracking import tracking
+from tensorflow.python.training.tracking import base as trackable
 from tensorflow.python.util import deprecation
 from tensorflow.python.util import nest
 from tensorflow.python.util.tf_export import tf_export
@@ -273,6 +273,8 @@ class _StateManagerImpl(StateManager):
     """
     self._trainable = trainable
     self._layer = layer
+    if self._layer is not None and not hasattr(self._layer, '_resources'):
+      self._layer._resources = []  # pylint: disable=protected-access
     self._cols_to_vars_map = collections.defaultdict(lambda: {})
     # TODO(vbardiovsky): Make sure the resources are tracked by moving them to
     # the layer (inheriting from AutoTrackable), e.g.:
@@ -290,17 +292,22 @@ class _StateManagerImpl(StateManager):
     if name in self._cols_to_vars_map[feature_column]:
       raise ValueError('Variable already exists.')
 
-    var = self._layer.add_variable(
-        name=name,
-        shape=shape,
-        dtype=dtype,
-        initializer=initializer,
-        trainable=self._trainable and trainable,
-        use_resource=use_resource,
-        # TODO(rohanj): Get rid of this hack once we have a mechanism for
-        # specifying a default partitioner for an entire layer. In that case,
-        # the default getter for Layers should work.
-        getter=variable_scope.get_variable)
+    # We explicitly track these variables since `name` is not guaranteed to be
+    # unique and disable manual tracking that the add_variable call does.
+    with trackable.no_manual_dependency_tracking_scope(self._layer):
+      var = self._layer.add_variable(
+          name=name,
+          shape=shape,
+          dtype=dtype,
+          initializer=initializer,
+          trainable=self._trainable and trainable,
+          use_resource=use_resource,
+          # TODO(rohanj): Get rid of this hack once we have a mechanism for
+          # specifying a default partitioner for an entire layer. In that case,
+          # the default getter for Layers should work.
+          getter=variable_scope.get_variable)
+    if isinstance(var, trackable.Trackable):
+      self._layer._track_trackable(var, feature_column.name + '/' + name)  # pylint: disable=protected-access
     self._cols_to_vars_map[feature_column][name] = var
     return var
 
@@ -311,6 +318,8 @@ class _StateManagerImpl(StateManager):
 
   def add_resource(self, feature_column, name, resource):
     self._cols_to_resources_map[feature_column][name] = resource
+    if self._layer is not None:
+      self._layer._resources.append(resource)  # pylint: disable=protected-access
 
   def get_resource(self, feature_column, name):
     if name in self._cols_to_resources_map[feature_column]:
@@ -332,13 +341,18 @@ class _StateManagerImplV2(_StateManagerImpl):
     if name in self._cols_to_vars_map[feature_column]:
       raise ValueError('Variable already exists.')
 
-    var = self._layer.add_variable(
-        name=name,
-        shape=shape,
-        dtype=dtype,
-        initializer=initializer,
-        trainable=self._trainable and trainable,
-        use_resource=use_resource)
+    # We explicitly track these variables since `name` is not guaranteed to be
+    # unique and disable manual tracking that the add_variable call does.
+    with trackable.no_manual_dependency_tracking_scope(self._layer):
+      var = self._layer.add_variable(
+          name=name,
+          shape=shape,
+          dtype=dtype,
+          initializer=initializer,
+          trainable=self._trainable and trainable,
+          use_resource=use_resource)
+    if isinstance(var, trackable.Trackable):
+      self._layer._track_trackable(var, feature_column.name + '/' + name)  # pylint: disable=protected-access
     self._cols_to_vars_map[feature_column][name] = var
     return var
 
@@ -752,17 +766,18 @@ def make_parse_example_spec_v2(feature_columns):
 
   ```python
   # Define features and transformations
-  feature_a = categorical_column_with_vocabulary_file(...)
-  feature_b = numeric_column(...)
-  feature_c_bucketized = bucketized_column(numeric_column("feature_c"), ...)
-  feature_a_x_feature_c = crossed_column(
+  feature_a = tf.feature_column.categorical_column_with_vocabulary_file(...)
+  feature_b = tf.feature_column.numeric_column(...)
+  feature_c_bucketized = tf.feature_column.bucketized_column(
+      tf.feature_column.numeric_column("feature_c"), ...)
+  feature_a_x_feature_c = tf.feature_column.crossed_column(
       columns=["feature_a", feature_c_bucketized], ...)
 
   feature_columns = set(
       [feature_b, feature_c_bucketized, feature_a_x_feature_c])
   features = tf.io.parse_example(
       serialized=serialized_examples,
-      features=make_parse_example_spec(feature_columns))
+      features=tf.feature_column.make_parse_example_spec(feature_columns))
   ```
 
   For the above example, make_parse_example_spec would return the dict:
@@ -1325,7 +1340,7 @@ def numeric_column(key,
 
 @tf_export('feature_column.bucketized_column')
 def bucketized_column(source_column, boundaries):
-  """Represents discretized dense input.
+  """Represents discretized dense input bucketed by `boundaries`.
 
   Buckets include the left boundary, and exclude the right boundary. Namely,
   `boundaries=[0., 1., 2.]` generates buckets `(-inf, 0.)`, `[0., 1.)`,
@@ -1351,30 +1366,30 @@ def bucketized_column(source_column, boundaries):
   Example:
 
   ```python
-  price = numeric_column('price')
-  bucketized_price = bucketized_column(price, boundaries=[...])
+  price = tf.feature_column.numeric_column('price')
+  bucketized_price = tf.feature_column.bucketized_column(
+      price, boundaries=[...])
   columns = [bucketized_price, ...]
-  features = tf.io.parse_example(..., features=make_parse_example_spec(columns))
-  linear_prediction = linear_model(features, columns)
-
-  # or
-  columns = [bucketized_price, ...]
-  features = tf.io.parse_example(..., features=make_parse_example_spec(columns))
-  dense_tensor = input_layer(features, columns)
-  ```
+  features = tf.io.parse_example(
+      ..., features=tf.feature_column.make_parse_example_spec(columns))
+  dense_tensor = tf.keras.layers.DenseFeatures(columns)(features)
 
   `bucketized_column` can also be crossed with another categorical column using
   `crossed_column`:
 
   ```python
-  price = numeric_column('price')
+  price = tf.feature_column.numeric_column('price')
   # bucketized_column converts numerical feature to a categorical one.
-  bucketized_price = bucketized_column(price, boundaries=[...])
+  bucketized_price = tf.feature_column.bucketized_column(
+      price, boundaries=[...])
   # 'keywords' is a string feature.
-  price_x_keywords = crossed_column([bucketized_price, 'keywords'], 50K)
+  price_x_keywords = tf.feature_column.crossed_column(
+      [bucketized_price, 'keywords'], 50K)
   columns = [price_x_keywords, ...]
-  features = tf.io.parse_example(..., features=make_parse_example_spec(columns))
-  linear_prediction = linear_model(features, columns)
+  features = tf.io.parse_example(
+      ..., features=tf.feature_column.make_parse_example_spec(columns))
+  dense_tensor = tf.keras.layers.DenseFeatures(columns)(features)
+  linear_model = tf.keras.experimental.LinearModel(units=...)(dense_tensor)
   ```
 
   Args:
@@ -1839,9 +1854,9 @@ def categorical_column_with_identity(key, num_buckets, default_value=None):
       column name and the dictionary key for feature parsing configs, feature
       `Tensor` objects, and feature columns.
     num_buckets: Range of inputs and outputs is `[0, num_buckets)`.
-    default_value: If `None`, this column's graph operations will fail for
-      out-of-range inputs. Otherwise, this value must be in the range
-      `[0, num_buckets)`, and will replace inputs in that range.
+    default_value: If set, values outside of range `[0, num_buckets)` will
+      be replaced with this value. If not set, values >= num_buckets will
+      cause a failure while values < 0 will be dropped.
 
   Returns:
     A `CategoricalColumn` that returns identity values.
@@ -2631,7 +2646,7 @@ class FeatureTransformationCache(object):
     if rank is not None:
       if rank == 0:
         raise ValueError(
-            'Feature (key: {}) cannot have rank 0. Give: {}'.format(
+            'Feature (key: {}) cannot have rank 0. Given: {}'.format(
                 key, feature_tensor))
       return feature_tensor if rank != 1 else expand_dims(feature_tensor)
 
@@ -3584,7 +3599,7 @@ class VocabularyFileCategoricalColumn(
   def _parse_example_spec(self):
     return self.parse_example_spec
 
-  def _transform_input_tensor(self, input_tensor):
+  def _transform_input_tensor(self, input_tensor, state_manager=None):
     """Creates a lookup table for the vocabulary."""
     if self.dtype.is_integer != input_tensor.dtype.is_integer:
       raise ValueError(
@@ -3602,20 +3617,23 @@ class VocabularyFileCategoricalColumn(
       key_dtype = dtypes.int64
       input_tensor = math_ops.cast(input_tensor, dtypes.int64)
 
-    # TODO(rohanj): Use state manager to manage the index table creation.
-    return lookup_ops.index_table_from_file(
+    name = '{}_lookup'.format(self.key)
+    table = lookup_ops.index_table_from_file(
         vocabulary_file=self.vocabulary_file,
         num_oov_buckets=self.num_oov_buckets,
         vocab_size=self.vocabulary_size,
         default_value=self.default_value,
         key_dtype=key_dtype,
-        name='{}_lookup'.format(self.key)).lookup(input_tensor)
+        name=name)
+    if state_manager is not None:
+      state_manager.add_resource(self, name, table)
+    return table.lookup(input_tensor)
 
   def transform_feature(self, transformation_cache, state_manager):
     """Creates a lookup table for the vocabulary."""
     input_tensor = _to_sparse_input_and_drop_ignore_values(
         transformation_cache.get(self.key, state_manager))
-    return self._transform_input_tensor(input_tensor)
+    return self._transform_input_tensor(input_tensor, state_manager)
 
   @deprecation.deprecated(_FEATURE_COLUMN_DEPRECATION_DATE,
                           _FEATURE_COLUMN_DEPRECATION)
@@ -3696,7 +3714,7 @@ class VocabularyListCategoricalColumn(
   def _parse_example_spec(self):
     return self.parse_example_spec
 
-  def _transform_input_tensor(self, input_tensor):
+  def _transform_input_tensor(self, input_tensor, state_manager=None):
     """Creates a lookup table for the vocabulary list."""
     if self.dtype.is_integer != input_tensor.dtype.is_integer:
       raise ValueError(
@@ -3714,19 +3732,22 @@ class VocabularyListCategoricalColumn(
       key_dtype = dtypes.int64
       input_tensor = math_ops.cast(input_tensor, dtypes.int64)
 
-    # TODO(rohanj): Use state manager to manage the index table creation.
-    return lookup_ops.index_table_from_tensor(
+    name = '{}_lookup'.format(self.key)
+    table = lookup_ops.index_table_from_tensor(
         vocabulary_list=tuple(self.vocabulary_list),
         default_value=self.default_value,
         num_oov_buckets=self.num_oov_buckets,
         dtype=key_dtype,
-        name='{}_lookup'.format(self.key)).lookup(input_tensor)
+        name=name)
+    if state_manager is not None:
+      state_manager.add_resource(self, name, table)
+    return table.lookup(input_tensor)
 
   def transform_feature(self, transformation_cache, state_manager):
     """Creates a lookup table for the vocabulary list."""
     input_tensor = _to_sparse_input_and_drop_ignore_values(
         transformation_cache.get(self.key, state_manager))
-    return self._transform_input_tensor(input_tensor)
+    return self._transform_input_tensor(input_tensor, state_manager)
 
   @deprecation.deprecated(_FEATURE_COLUMN_DEPRECATION_DATE,
                           _FEATURE_COLUMN_DEPRECATION)
@@ -3812,22 +3833,14 @@ class IdentityCategoricalColumn(
       raise ValueError(
           'Invalid input, not integer. key: {} dtype: {}'.format(
               self.key, input_tensor.dtype))
-
-    values = math_ops.cast(input_tensor.values, dtypes.int64, name='values')
-    num_buckets = math_ops.cast(
-        self.num_buckets, dtypes.int64, name='num_buckets')
-    zero = math_ops.cast(0, dtypes.int64, name='zero')
-    if self.default_value is None:
-      # Fail if values are out-of-range.
-      assert_less = check_ops.assert_less(
-          values, num_buckets, data=(values, num_buckets),
-          name='assert_less_than_num_buckets')
-      assert_greater = check_ops.assert_greater_equal(
-          values, zero, data=(values,),
-          name='assert_greater_or_equal_0')
-      with ops.control_dependencies((assert_less, assert_greater)):
-        values = array_ops.identity(values)
-    else:
+    values = input_tensor.values
+    if input_tensor.values.dtype != dtypes.int64:
+      values = math_ops.cast(values, dtypes.int64, name='values')
+    if self.default_value is not None:
+      values = math_ops.cast(input_tensor.values, dtypes.int64, name='values')
+      num_buckets = math_ops.cast(
+          self.num_buckets, dtypes.int64, name='num_buckets')
+      zero = math_ops.cast(0, dtypes.int64, name='zero')
       # Assign default for out-of-range values.
       values = array_ops.where_v2(
           math_ops.logical_or(

@@ -74,6 +74,7 @@ Status IteratorResource::GetNext(OpKernelContext* ctx,
     params.function_handle_cache = captured_state->function_handle_cache.get();
     params.resource_mgr = &captured_state->resource_mgr;
     params.thread_factory = unbounded_thread_pool_.get_thread_factory();
+    params.thread_pool = &unbounded_thread_pool_;
     params.cancellation_manager = &captured_state->cancellation_manager;
     std::function<void()> deregister_fn;
     TF_RETURN_IF_ERROR(ConnectCancellationManagers(ctx->cancellation_manager(),
@@ -118,14 +119,15 @@ Status IteratorResource::Restore(OpKernelContext* ctx,
     params.function_handle_cache = captured_state->function_handle_cache.get();
     params.resource_mgr = &captured_state->resource_mgr;
     params.thread_factory = unbounded_thread_pool_.get_thread_factory();
+    params.thread_pool = &unbounded_thread_pool_;
     params.cancellation_manager = &captured_state->cancellation_manager;
     std::function<void()> deregister_fn;
     TF_RETURN_IF_ERROR(ConnectCancellationManagers(ctx->cancellation_manager(),
                                                    params.cancellation_manager,
                                                    &deregister_fn));
     auto cleanup = gtl::MakeCleanup(std::move(deregister_fn));
-    return captured_state->iterator->Restore(IteratorContext(std::move(params)),
-                                             reader);
+    IteratorContext iter_ctx(std::move(params));
+    return captured_state->iterator->Restore(&iter_ctx, reader);
   }
   return errors::FailedPrecondition(
       "Restore() failed because the iterator has not been initialized. Ensure "
@@ -149,6 +151,7 @@ Status IteratorResource::SetIteratorFromDataset(OpKernelContext* ctx,
   params.function_handle_cache = new_state->function_handle_cache.get();
   params.resource_mgr = &new_state->resource_mgr;
   params.thread_factory = unbounded_thread_pool_.get_thread_factory();
+  params.thread_pool = &unbounded_thread_pool_;
   params.cancellation_manager = &new_state->cancellation_manager;
   std::function<void()> deregister_fn;
   TF_RETURN_IF_ERROR(ConnectCancellationManagers(ctx->cancellation_manager(),
@@ -352,9 +355,10 @@ FunctionLibraryRuntime* IteratorHandleOp::CreatePrivateFLR(
   // in its resource manager. The existing device will outlive the
   // IteratorResource, because we are storing the IteratorResource
   // in that device's resource manager.
-  *device_mgr = absl::make_unique<DeviceMgr>(RenamedDevice::NewRenamedDevice(
-      ctx->device()->name(), down_cast<Device*>(ctx->device()),
-      false /* owns_underlying */, false /* isolate_session_state */));
+  *device_mgr =
+      absl::make_unique<StaticDeviceMgr>(RenamedDevice::NewRenamedDevice(
+          ctx->device()->name(), down_cast<Device*>(ctx->device()),
+          false /* owns_underlying */, false /* isolate_session_state */));
   *flib_def = absl::make_unique<FunctionLibraryDefinition>(
       *ctx->function_library()->GetFunctionLibraryDefinition());
   *pflr = absl::make_unique<ProcessFunctionLibraryRuntime>(
@@ -999,7 +1003,7 @@ void IteratorToStringHandleOp::Compute(OpKernelContext* ctx) {
   Tensor* string_handle_t;
   OP_REQUIRES_OK(ctx,
                  ctx->allocate_output(0, TensorShape({}), &string_handle_t));
-  string_handle_t->scalar<string>()() =
+  string_handle_t->scalar<tstring>()() =
       resource_handle_t.scalar<ResourceHandle>()().SerializeAsString();
 }
 
@@ -1023,7 +1027,7 @@ void IteratorFromStringHandleOp::Compute(OpKernelContext* ctx) {
 
   ResourceHandle resource_handle;
   OP_REQUIRES(
-      ctx, resource_handle.ParseFromString(string_handle_t.scalar<string>()()),
+      ctx, resource_handle.ParseFromString(string_handle_t.scalar<tstring>()()),
       errors::InvalidArgument(
           "Could not parse string_handle as a valid ResourceHandle"));
 

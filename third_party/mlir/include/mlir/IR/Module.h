@@ -25,6 +25,8 @@
 #include "mlir/IR/SymbolTable.h"
 
 namespace mlir {
+class ModuleTerminatorOp;
+
 //===----------------------------------------------------------------------===//
 // Module Operation.
 //===----------------------------------------------------------------------===//
@@ -33,22 +35,25 @@ namespace mlir {
 /// single block containing opaque operations. The region of a module is not
 /// allowed to implicitly capture global values, and all external references
 /// must use symbolic references via attributes(e.g. via a string name).
-class ModuleOp : public Op<ModuleOp, OpTrait::ZeroOperands, OpTrait::ZeroResult,
-                           OpTrait::IsIsolatedFromAbove, OpTrait::SymbolTable> {
+class ModuleOp
+    : public Op<
+          ModuleOp, OpTrait::ZeroOperands, OpTrait::ZeroResult,
+          OpTrait::IsIsolatedFromAbove, OpTrait::SymbolTable,
+          OpTrait::SingleBlockImplicitTerminator<ModuleTerminatorOp>::Impl> {
 public:
   using Op::Op;
   using Op::print;
 
   static StringRef getOperationName() { return "module"; }
 
-  static void build(Builder *builder, OperationState *result);
+  static void build(Builder *builder, OperationState &result);
 
   /// Construct a module from the given location.
   static ModuleOp create(Location loc);
 
   /// Operation hooks.
-  static ParseResult parse(OpAsmParser *parser, OperationState *result);
-  void print(OpAsmPrinter *p);
+  static ParseResult parse(OpAsmParser &parser, OperationState &result);
+  void print(OpAsmPrinter &p);
   LogicalResult verify();
 
   /// Return body of this module.
@@ -102,13 +107,11 @@ public:
 /// the terminator in their custom syntax for brevity.
 class ModuleTerminatorOp
     : public Op<ModuleTerminatorOp, OpTrait::ZeroOperands, OpTrait::ZeroResult,
-                OpTrait::IsTerminator> {
+                OpTrait::HasParent<ModuleOp>::Impl, OpTrait::IsTerminator> {
 public:
   using Op::Op;
   static StringRef getOperationName() { return "module_terminator"; }
-
-  static void build(Builder *, OperationState *) {}
-  LogicalResult verify();
+  static void build(Builder *, OperationState &) {}
 };
 
 //===----------------------------------------------------------------------===//

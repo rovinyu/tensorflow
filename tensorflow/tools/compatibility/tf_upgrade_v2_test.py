@@ -340,11 +340,16 @@ class TestUpgrade(test_util.TensorFlowTestCase, parameterized.TestCase):
     method_names = full_dict.keys()
     for method_name in method_names:
       args = full_dict[method_name].keys()
-      # special case for optimizer methods
-      if method_name.startswith("*."):
+      if "contrib" in method_name:
+        # Skip descending and fetching contrib methods during test. These are
+        # not available in the repo anymore.
+        continue
+      elif method_name.startswith("*."):
+        # special case for optimizer methods
         method = method_name.replace("*", "tf.train.Optimizer")
       else:
         method = method_name
+
       method = get_symbol_for_name(tf, method)
       arg_spec = tf_inspect.getfullargspec(method)
       for (arg, pos) in args:
@@ -2066,6 +2071,12 @@ def _log_prob(self, x):
   def testNnErosion2d(self):
     text = "tf.nn.erosion2d(v, k, s, r, p)"
     expected_text = "tf.nn.erosion2d(v, k, s, r, p, data_format='NHWC')"
+    _, _, _, new_text = self._upgrade(text)
+    self.assertEqual(new_text, expected_text)
+
+  def testNnDilation2d(self):
+    text = "tf.nn.dilation2d(v, k, s, r, p)"
+    expected_text = "tf.nn.dilation2d(v, k, s, r, p, data_format='NHWC')"
     _, _, _, new_text = self._upgrade(text)
     self.assertEqual(new_text, expected_text)
 

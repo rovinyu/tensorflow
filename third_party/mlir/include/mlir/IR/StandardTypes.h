@@ -71,13 +71,6 @@ enum Kind {
 
 } // namespace StandardTypes
 
-inline bool Type::isBF16() { return getKind() == StandardTypes::BF16; }
-inline bool Type::isF16() { return getKind() == StandardTypes::F16; }
-inline bool Type::isF32() { return getKind() == StandardTypes::F32; }
-inline bool Type::isF64() { return getKind() == StandardTypes::F64; }
-
-inline bool Type::isIndex() { return getKind() == StandardTypes::Index; }
-
 /// Index is a special integer-like type with unknown platform-dependent bit
 /// width.
 class IndexType : public Type::TypeBase<IndexType, Type> {
@@ -122,25 +115,6 @@ public:
   /// Integer representation maximal bitwidth.
   static constexpr unsigned kMaxWidth = 4096;
 };
-
-/// Return true if this is an integer type with the specified width.
-inline bool Type::isInteger(unsigned width) {
-  if (auto intTy = dyn_cast<IntegerType>())
-    return intTy.getWidth() == width;
-  return false;
-}
-
-inline bool Type::isIntOrIndex() {
-  return isa<IndexType>() || isa<IntegerType>();
-}
-
-inline bool Type::isIntOrIndexOrFloat() {
-  return isa<IndexType>() || isa<IntegerType>() || isa<FloatType>();
-}
-
-inline bool Type::isIntOrFloat() {
-  return isa<IntegerType>() || isa<FloatType>();
-}
 
 class FloatType : public Type::TypeBase<FloatType, Type> {
 public:
@@ -392,6 +366,32 @@ public:
 
   /// Returns the memory space in which data referred to by this memref resides.
   unsigned getMemorySpace() const;
+
+  /// Returns the strides of the MemRef if the layout map is in strided form.
+  /// MemRefs with layout maps in strided form include:
+  ///   1. empty or identity layout map, in which case the stride information is
+  ///      the canonical form computed from sizes;
+  ///   2. single affine map layout of the form `K + k0 * d0 + ... kn * dn`,
+  ///      where K and ki's are constants or symbols.
+  ///
+  /// A stride specification is a list of integer values that are either static
+  /// or dynamic (encoded with kDynamicStride). Strides encode the distance in
+  /// the number of elements between successive entries along a particular
+  /// dimension.
+  /// For example, `memref<42x16xf32, (64 * d0 + d1)>` specifies a view into a
+  /// non-contiguous memory region of `42` by `16` `f32` elements in which the
+  /// distance between two consecutive elements along the outer dimension is `1`
+  /// and the distance between two consecutive elements along the inner
+  /// dimension is `64`.
+  ///
+  /// If a simple strided form cannot be extracted from the composition of the
+  /// layout map, returns llvm::None.
+  ///
+  /// The convention is that the strides for dimensions d0, .. dn appear in
+  /// order followed by the constant offset, to make indexing intuitive into the
+  /// result.
+  static constexpr int64_t kDynamicStride = std::numeric_limits<int64_t>::min();
+  LogicalResult getStrides(SmallVectorImpl<int64_t> &strides) const;
 
   static bool kindof(unsigned kind) { return kind == StandardTypes::MemRef; }
 

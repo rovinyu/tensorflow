@@ -71,39 +71,41 @@ class StagingError(AutoGraphError):
 class _ErrorMetadata(errors.ErrorMetadataBase):
   """AutoGraph-specific error metadata. See base class."""
 
-  def create_exception(self, preferred_type):
-    if preferred_type == errors_impl.OpError:
+  def create_exception(self, source_error):
+    preferred_type = type(source_error)
+    if issubclass(preferred_type, errors_impl.OpError):
       # Best-effort unpacking of OpError exceptions.
       # TODO(mdan): Use a mechanism that is more future-proof.
-      t = type(self.cause)
-      init_argspec = tf_inspect.getfullargspec(t.__init__)
+      init_argspec = tf_inspect.getfullargspec(preferred_type.__init__)
       message = self.get_message()
-      init_args = tuple(init_argspec.argspec)
+      init_args = tuple(init_argspec.args)
       # At the time of this writing, TF errors either take 3 or 4 arguments,
       # with the fourth being error_code.
       if init_args == ('self', 'node_def', 'op', 'message', 'error_code'):
-        return t(
-            node_def=self.cause.node_def,
-            op=self.cause.op,
+        return preferred_type(
+            node_def=source_error.node_def,
+            op=source_error.op,
             message=message,
             error_code=self.error_code)
       elif init_args == ('self', 'node_def', 'op', 'message'):
         if 'error_code' in init_argspec.kwonlyargs:
-          return t(
-              node_def=self.cause.node_def,
-              op=self.cause.op,
+          return preferred_type(
+              node_def=source_error.node_def,
+              op=source_error.op,
               message=message,
               errro_code=self.error_code)
         else:
-          return t(
-              node_def=self.cause.node_def, op=self.cause.op, message=message)
+          return preferred_type(
+              node_def=source_error.node_def,
+              op=source_error.op,
+              message=message)
 
     elif preferred_type in (AutoGraphError, ConversionError, StagingError,
                             errors_impl.InaccessibleTensorError,
                             errors_impl.OperatorNotAllowedInGraphError):
       return preferred_type(self.get_message())
 
-    exc = super(_ErrorMetadata, self).create_exception(preferred_type)
+    exc = super(_ErrorMetadata, self).create_exception(source_error)
     if exc is not None:
       return exc
 
@@ -232,7 +234,7 @@ def convert(recursive=False, optional_features=None, user_requested=True):
         return converted_call(f, options, args, kwargs)
       except Exception as e:  # pylint:disable=broad-except
         if hasattr(e, 'ag_error_metadata'):
-          raise e.ag_error_metadata.to_exception(type(e))
+          raise e.ag_error_metadata.to_exception(e)
         else:
           raise
 
@@ -360,8 +362,29 @@ def _is_known_loaded_type(f, module_name, entity_name):
   return False
 
 
-def converted_call(f, options, args, kwargs):
-  """Compiles a function call inline. For internal use only."""
+def _errors_are_normally_possible(entity, error):
+  if inspect_utils.islambda(entity) and isinstance(error, ValueError):
+    return True
+  return False
+
+
+def converted_call(f, options, args, kwargs, caller_fn_scope=None):
+  """Compiles a function call inline.
+
+  For internal use only.
+
+  Args:
+    f: The function to convert.
+    options: converter.ConversionOptions
+    args: Tuple, the original positional arguments of f
+    kwargs: Dict, the original keyword arguments of f
+    caller_fn_scope: Optional[function_wrappers.FunctionScope], the function
+      scope of the converted function in which this call was originally made.
+
+  Returns:
+    Any, the result of executing a possibly-converted `f` with the given
+      arguments.
+  """
   logging.log(1, 'Converted call: %s\n    args: %s\n    kwargs: %s\n', f, args,
               kwargs)
 
@@ -370,9 +393,9 @@ def converted_call(f, options, args, kwargs):
 
   if inspect_utils.isbuiltin(f):
     if f is eval:
-      return py_builtins.eval_in_original_context(f, args, 1)
+      return py_builtins.eval_in_original_context(f, args, caller_fn_scope)
     if f is super:
-      return py_builtins.super_in_original_context(f, args, 1)
+      return py_builtins.super_in_original_context(f, args, caller_fn_scope)
     if kwargs:
       return py_builtins.overload_of(f)(*args, **kwargs)
     else:
@@ -387,9 +410,9 @@ def converted_call(f, options, args, kwargs):
   if (_is_known_loaded_type(f, 'wrapt', 'FunctionWrapper') or
       _is_known_loaded_type(f, 'wrapt', 'BoundFunctionWrapper')):
     logging.warn(
-        'Entity {} appears to be decorated by wrapt, which is not yet supported'
-        ' by AutoGraph. The function will be called without transformation.'
-        ' You may however apply AutoGraph before the decorator.'.format(f))
+        '{} appears to be decorated by wrapt, which is not yet supported'
+        ' by AutoGraph. The function will run as-is.'
+        ' You may still apply AutoGraph before the wrapt decorator.'.format(f))
     logging.log(2, 'Permanently whitelisted: %s: wrapt decorated', f)
     return _call_unconverted(f, args, kwargs, options)
 
@@ -509,11 +532,17 @@ def converted_call(f, options, args, kwargs):
     logging.log(1, 'Error transforming entity %s', target_entity, exc_info=True)
     if is_autograph_strict_conversion_mode():
       raise
-    logging.warn(
-        'Entity %s could not be transformed and will be executed as-is.'
-        ' Please report this to the AutoGraph team. When filing the bug, set'
-        ' the verbosity to 10 (on Linux, `export AUTOGRAPH_VERBOSITY=10`) and'
-        ' attach the full output. Cause: %s', target_entity, e)
+    if _errors_are_normally_possible(target_entity, e):
+      logging.warn(
+          'AutoGraph could not transform %s and will run it as-is.\n'
+          'Cause: %s', target_entity, e)
+    else:
+      logging.warn(
+          'AutoGraph could not transform %s and will run it as-is.\n'
+          'Please report this to the TensorFlow team. When filing the bug, set'
+          ' the verbosity to 10 (on Linux, `export AUTOGRAPH_VERBOSITY=10`) and'
+          ' attach the full output.\n'
+          'Cause: %s', target_entity, e)
     return _call_unconverted(f, args, kwargs, options)
 
   with StackTraceMapper(converted_f), tf_stack.CurrentModuleFilter():
@@ -529,6 +558,7 @@ def converted_call(f, options, args, kwargs):
   return result
 
 
+# pylint:disable=line-too-long
 @tf_export('autograph.to_graph', v1=[])
 def to_graph(entity, recursive=True, experimental_optional_features=None):
   """Converts a Python entity into a TensorFlow graph.
@@ -543,22 +573,19 @@ def to_graph(entity, recursive=True, experimental_optional_features=None):
   TensorFlow function or a Python callable. Internally, `tf.function` uses
   `to_graph`.
 
-  _Example Usage_
+  Example usage:
 
-  ```python
-    def foo(x):
-      if x > 0:
-        y = x * x
-      else:
-        y = -x
-      return y
-
-    converted_foo = to_graph(foo)
-
-    x = tf.constant(1)
-    y = converted_foo(x)  # converted_foo is a TensorFlow Op-like.
-    assert is_tensor(y)
-  ```
+  >>> def f(x):
+  ...   if x > 0:
+  ...     y = x * x
+  ...   else:
+  ...     y = -x
+  ...   return y
+  ...
+  >>> converted_f = to_graph(f)
+  >>> x = tf.constant(2)
+  >>> converted_f(x)  # converted_foo is like a TensorFlow Op.
+  <tf.Tensor: id=..., shape=(), dtype=int32, numpy=4>
 
   Supported Python entities include:
     * functions
@@ -573,13 +600,17 @@ def to_graph(entity, recursive=True, experimental_optional_features=None):
   Methods are converted into unbound function that have an additional first
   argument called `self`.
 
+  For a tutorial, see the
+  [tf.function and AutoGraph guide](https://www.tensorflow.org/beta/guide/autograph).
+  For more detailed information, see the
+  [AutoGraph reference documentation](https://github.com/tensorflow/tensorflow/blob/master/tensorflow/python/autograph/g3doc/reference/index.md).
+
   Args:
     entity: Python callable or class to convert.
     recursive: Whether to recursively convert any functions that the converted
       function may call.
     experimental_optional_features: `None`, a tuple of, or a single
-      `tf.autograph.experimental.Feature` value. Controls the use of optional
-      features in the conversion process.
+      `tf.autograph.experimental.Feature` value.
 
   Returns:
     Same as `entity`, the converted Python function or class.
@@ -656,8 +687,7 @@ def to_graph_v1(entity,
     arg_values: Deprecated.
     arg_types: Deprecated.
     experimental_optional_features: `None`, a tuple of, or a single
-      `tf.autograph.experimental.Feature` value. Controls the use of optional
-      features in the conversion process.
+      `tf.autograph.experimental.Feature` value.
 
   Returns:
     Same as `entity`, the converted Python function or class.
@@ -680,23 +710,40 @@ def to_code_v1(entity,
                arg_types=None,
                indentation='  ',
                experimental_optional_features=None):
-  """Similar to `to_graph`, but returns Python source code as a string.
+  """Returns the source code generated by AutoGraph, as a string.
+
+  Example usage:
+
+  >>> def f(x):
+  ...   if x < 0:
+  ...     x = -x
+  ...   return x
+  >>> tf.autograph.to_code(f)
+  "def tf__f(x):..."
 
   Also see: `tf.autograph.to_graph`.
 
-  `to_graph` returns the Python source code that can be used to generate a
-  TensorFlow graph that is functionally identical to the input Python code.
+  Note: If a function has been decorated with `tf.function`, pass its
+  underlying Python function, rather than the callable that `tf.function
+  creates:
+
+  >>> @tf.function
+  ... def f(x):
+  ...   if x < 0:
+  ...     x = -x
+  ...   return x
+  >>> tf.autograph.to_code(f.python_function)
+  "def tf__f(x):..."
 
   Args:
-    entity: Python callable or class to convert.
+    entity: Python callable or class.
     recursive: Whether to recursively convert any functions that the converted
       function may call.
     arg_values: Deprecated.
     arg_types: Deprecated.
     indentation: Deprecated.
     experimental_optional_features: `None`, a tuple of, or a single
-      `tf.autograph.experimental.Feature` value. Controls the use of optional
-      features in the conversion process.
+      `tf.autograph.experimental.Feature` value.
 
   Returns:
     The converted code as string.
@@ -712,20 +759,37 @@ def to_code_v1(entity,
 
 @tf_export('autograph.to_code', v1=[])
 def to_code(entity, recursive=True, experimental_optional_features=None):
-  """Similar to `to_graph`, but returns Python source code as a string.
+  """Returns the source code generated by AutoGraph, as a string.
+
+  Example usage:
+
+  >>> def f(x):
+  ...   if x < 0:
+  ...     x = -x
+  ...   return x
+  >>> tf.autograph.to_code(f)
+  "def tf__f(x):..."
 
   Also see: `tf.autograph.to_graph`.
 
-  `to_graph` returns the Python source code that can be used to generate a
-  TensorFlow graph that is functionally identical to the input Python code.
+  Note: If a function has been decorated with `tf.function`, pass its
+  underlying Python function, rather than the callable that `tf.function
+  creates:
+
+  >>> @tf.function
+  ... def f(x):
+  ...   if x < 0:
+  ...     x = -x
+  ...   return x
+  >>> tf.autograph.to_code(f.python_function)
+  "def tf__f(x):..."
 
   Args:
     entity: Python callable or class to convert.
     recursive: Whether to recursively convert any functions that the converted
       function may call.
     experimental_optional_features: `None`, a tuple of, or a single
-      `tf.autograph.experimental.Feature` value. Controls the use of optional
-      features in the conversion process.
+      `tf.autograph.experimental.Feature` value.
 
   Returns:
     The converted code as string.

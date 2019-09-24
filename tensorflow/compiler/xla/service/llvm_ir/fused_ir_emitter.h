@@ -28,7 +28,6 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/elemental_ir_emitter.h"
 #include "tensorflow/compiler/xla/service/hlo_instruction.h"
 #include "tensorflow/compiler/xla/service/llvm_ir/ir_array.h"
-#include "tensorflow/compiler/xla/service/llvm_ir/kernel_tiling.h"
 #include "tensorflow/compiler/xla/service/llvm_ir/loop_emitter.h"
 #include "tensorflow/compiler/xla/statusor.h"
 #include "tensorflow/compiler/xla/xla_data.pb.h"
@@ -120,8 +119,14 @@ class FusedIrEmitter : public DfsHloVisitorWithDefault {
   absl::optional<std::vector<llvm_ir::IrArray>> operand_arrays_;
   GeneratorForOperandIrArrays operand_arrays_generator_;
 
+  // The x coordinate within a tile.
   llvm::Value* tile_param_x_;
+
+  // The y coordinate within a tile.
   llvm::Value* tile_param_y_;
+
+  // Param_buffers_[i] stores the tile buffer for the ith parameter or nullptr
+  // if the parameter is not tiled.
   std::vector<llvm::Value*> param_shmem_buffers_;
 
   ElementalIrEmitter* elemental_emitter_;
